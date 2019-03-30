@@ -27,10 +27,10 @@ index f4464d253..8539d9372 100644
  ###################################
 diff --git a/src/modules/module-hdmi-cec-volume.c b/src/modules/module-hdmi-cec-volume.c
 new file mode 100644
-index 000000000..c6ebc6413
+index 000000000..0d1336d5c
 --- /dev/null
 +++ b/src/modules/module-hdmi-cec-volume.c
-@@ -0,0 +1,199 @@
+@@ -0,0 +1,208 @@
 +#ifdef HAVE_CONFIG_H
 +#include <config.h>
 +#endif
@@ -56,6 +56,7 @@ index 000000000..c6ebc6413
 +    pa_module *module;
 +    pa_sink *sink;
 +    pa_hook_slot *volume_changed_slot;
++    pa_hook_slot *sink_put_slot;
 +    libcec_connection_t cec;
 +    int target_vol;
 +    int key_pressed;
@@ -65,8 +66,7 @@ index 000000000..c6ebc6413
 +};
 +
 +#if CEC_LOGGING
-+static void cb_cec_log_message(void* usr_data, const cec_log_message* message)
-+{
++static void cb_cec_log_message(void* usr_data, const cec_log_message* message) {
 +    struct userdata* u = usr_data;
 +    const char* strLevel;
 +    switch (message->level)
@@ -158,6 +158,16 @@ index 000000000..c6ebc6413
 +     * the volume change since the module userdata is not available this way. */
 +}
 +
++static pa_hook_result_t sink_put_cb(pa_core *c, pa_sink *sink, struct userdata* u) {
++    if (strstr(sink->name, "hdmi")) {
++        u->sink = sink;
++        u->target_vol = pa_cvolume_avg(&sink->reference_volume) / (double)PA_VOLUME_NORM * 100;
++        pa_sink_set_set_volume_callback(sink, pa_sink_set_volume_cb);
++        pa_cvolume_reset(&sink->soft_volume, sink->sample_spec.channels);
++    }
++    return PA_HOOK_OK;
++}
++
 +int pa__init(pa_module*m) {
 +    struct userdata *u;
 +
@@ -172,13 +182,8 @@ index 000000000..c6ebc6413
 +    if (m->core->sinks) {
 +        pa_sink *sink;
 +        uint32_t sidx;
-+        PA_IDXSET_FOREACH(sink, m->core->sinks, sidx) {
-+            if (strstr(sink->name, "hdmi")) {
-+                u->sink = sink;
-+                u->target_vol = pa_cvolume_avg(&sink->reference_volume) / (double)PA_VOLUME_NORM * 100;
-+                pa_sink_set_set_volume_callback(sink, pa_sink_set_volume_cb);
-+            }
-+        }
++        PA_IDXSET_FOREACH(sink, m->core->sinks, sidx)
++            sink_put_cb(m->core, sink, u);
 +    }
 +
 +    libcec_clear_configuration(&g_config);
@@ -206,6 +211,8 @@ index 000000000..c6ebc6413
 +
 +    u->volume_changed_slot = pa_hook_connect(&m->core->hooks[PA_CORE_HOOK_SINK_VOLUME_CHANGED], PA_HOOK_LATE,
 +                                             (pa_hook_cb_t)volume_changed_cb, u);
++    u->sink_put_slot = pa_hook_connect(&m->core->hooks[PA_CORE_HOOK_SINK_PUT], PA_HOOK_LATE,
++                                       (pa_hook_cb_t)sink_put_cb, u);
 +
 +    return 0;
 +}
@@ -227,6 +234,8 @@ index 000000000..c6ebc6413
 +
 +    if (u->volume_changed_slot)
 +        pa_hook_slot_free(u->volume_changed_slot);
++    if (u->sink_put_slot)
++        pa_hook_slot_free(u->sink_put_slot);
 +
 +    pa_xfree(u);
 +}
