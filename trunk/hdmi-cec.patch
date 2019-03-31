@@ -27,10 +27,10 @@ index f4464d253..8539d9372 100644
  ###################################
 diff --git a/src/modules/module-hdmi-cec-volume.c b/src/modules/module-hdmi-cec-volume.c
 new file mode 100644
-index 000000000..0d1336d5c
+index 000000000..4d21cb782
 --- /dev/null
 +++ b/src/modules/module-hdmi-cec-volume.c
-@@ -0,0 +1,208 @@
+@@ -0,0 +1,232 @@
 +#ifdef HAVE_CONFIG_H
 +#include <config.h>
 +#endif
@@ -57,6 +57,7 @@ index 000000000..0d1336d5c
 +    pa_sink *sink;
 +    pa_hook_slot *volume_changed_slot;
 +    pa_hook_slot *sink_put_slot;
++    pa_defer_event *recover_defer;
 +    libcec_connection_t cec;
 +    int target_vol;
 +    int key_pressed;
@@ -109,10 +110,10 @@ index 000000000..0d1336d5c
 +    struct userdata* u = usr_data;
 +
 +    if (command->opcode == CEC_OPCODE_REPORT_AUDIO_STATUS) {
-+        /* Volume reply from receiver */
++        /* Volume reply from receiver. */
 +        int cur_vol = command->parameters.data[0];
 +
-+        /* Press volume key in a closed-loop fashion */
++        /* Press volume key in a closed-loop fashion. */
 +        if (cur_vol > u->target_vol) {
 +            libcec_send_keypress(u->cec, CECDEVICE_AUDIOSYSTEM, CEC_USER_CONTROL_CODE_VOLUME_DOWN, 1);
 +            u->key_pressed = 1;
@@ -127,14 +128,22 @@ index 000000000..0d1336d5c
 +            u->key_pressed = 0;
 +        }
 +
-+        /* Request new volume (next loop iteration) */
++        /* Request new volume (next loop iteration). */
 +        give_audio_status(u);
 +
 +    } else if (command->opcode == CEC_OPCODE_SET_SYSTEM_AUDIO_MODE) {
-+        /* Receiver turned on; initiate request loop */
++        /* Receiver turned on; initiate request loop. */
 +        if (command->parameters.data[0])
 +            give_audio_status(u);
 +    }
++}
++
++static void cb_cec_alert(void* usr_data, const libcec_alert alert, const libcec_parameter param) {
++    struct userdata* u = usr_data;
++
++    /* This generally happens after waking from sleep. Defer libcec reset. */
++    if (alert == CEC_ALERT_CONNECTION_LOST)
++        u->module->core->mainloop->defer_enable(u->recover_defer, 1);
 +}
 +
 +static ICECCallbacks g_callbacks = {
@@ -142,6 +151,7 @@ index 000000000..0d1336d5c
 +    .logMessage           = cb_cec_log_message,
 +#endif
 +    .commandReceived      = cb_cec_command_received,
++    .alert                = cb_cec_alert,
 +};
 +
 +static pa_hook_result_t volume_changed_cb(pa_core *c, pa_sink *sink, struct userdata* u) {
@@ -160,12 +170,34 @@ index 000000000..0d1336d5c
 +
 +static pa_hook_result_t sink_put_cb(pa_core *c, pa_sink *sink, struct userdata* u) {
 +    if (strstr(sink->name, "hdmi")) {
++        /* Reregister HDMI sink (typically happens with new user session). */
 +        u->sink = sink;
 +        u->target_vol = pa_cvolume_avg(&sink->reference_volume) / (double)PA_VOLUME_NORM * 100;
 +        pa_sink_set_set_volume_callback(sink, pa_sink_set_volume_cb);
 +        pa_cvolume_reset(&sink->soft_volume, sink->sample_spec.channels);
 +    }
 +    return PA_HOOK_OK;
++}
++
++static void recover_cb(pa_mainloop_api*a, pa_defer_event* e, struct userdata *u) {
++    a->defer_enable(e, 0);
++
++    /* Completely reset libcec. */
++    if (u->cec)
++        libcec_destroy(u->cec);
++    u->cec = libcec_initialise(&g_config);
++    if (u->cec) {
++        cec_adapter devices[1];
++        int8_t iDevicesFound;
++        iDevicesFound = libcec_find_adapters(u->cec, devices, 1, NULL);
++        if (iDevicesFound) {
++            libcec_open(u->cec, devices[0].comm, 5000);
++            /* Turn on receiver. */
++            libcec_power_on_devices(u->cec, CECDEVICE_AUDIOSYSTEM);
++            /* If receiver is already on, initiate volume request loop. */
++            give_audio_status(u);
++        }
++    }
 +}
 +
 +int pa__init(pa_module*m) {
@@ -195,19 +227,9 @@ index 000000000..0d1336d5c
 +    g_config.callbackParam = u;
 +    snprintf(g_config.strDeviceName, sizeof(g_config.strDeviceName), "PA CEC");
 +    g_config.deviceTypes.types[0] = CEC_DEVICE_TYPE_RECORDING_DEVICE;
-+    u->cec = libcec_initialise(&g_config);
-+    if (u->cec) {
-+        cec_adapter devices[1];
-+        int8_t iDevicesFound;
-+        iDevicesFound = libcec_find_adapters(u->cec, devices, 1, NULL);
-+        if (iDevicesFound) {
-+            libcec_open(u->cec, devices[0].comm, 5000);
-+            /* Turn on receiver */
-+            libcec_power_on_devices(u->cec, CECDEVICE_AUDIOSYSTEM);
-+            /* If receiver is already on, initiate volume request loop */
-+            give_audio_status(u);
-+        }
-+    }
++    u->cec = NULL;
++
++    u->recover_defer = m->core->mainloop->defer_new(m->core->mainloop, (pa_defer_event_cb_t)recover_cb, u);
 +
 +    u->volume_changed_slot = pa_hook_connect(&m->core->hooks[PA_CORE_HOOK_SINK_VOLUME_CHANGED], PA_HOOK_LATE,
 +                                             (pa_hook_cb_t)volume_changed_cb, u);
@@ -224,7 +246,7 @@ index 000000000..0d1336d5c
 +    if (!(u = m->userdata))
 +        return;
 +    if (u->cec) {
-+        /* Turn off receiver */
++        /* Turn off receiver. */
 +        libcec_standby_devices(u->cec, CECDEVICE_AUDIOSYSTEM);
 +        libcec_destroy(u->cec);
 +    }
@@ -236,6 +258,8 @@ index 000000000..0d1336d5c
 +        pa_hook_slot_free(u->volume_changed_slot);
 +    if (u->sink_put_slot)
 +        pa_hook_slot_free(u->sink_put_slot);
++    if (u->recover_defer)
++        m->core->mainloop->defer_free(u->recover_defer);
 +
 +    pa_xfree(u);
 +}
