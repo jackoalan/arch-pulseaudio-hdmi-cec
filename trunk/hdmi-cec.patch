@@ -27,10 +27,10 @@ index f4464d253..8539d9372 100644
  ###################################
 diff --git a/src/modules/module-hdmi-cec-volume.c b/src/modules/module-hdmi-cec-volume.c
 new file mode 100644
-index 000000000..4d21cb782
+index 000000000..6e99cf586
 --- /dev/null
 +++ b/src/modules/module-hdmi-cec-volume.c
-@@ -0,0 +1,232 @@
+@@ -0,0 +1,228 @@
 +#ifdef HAVE_CONFIG_H
 +#include <config.h>
 +#endif
@@ -54,9 +54,8 @@ index 000000000..4d21cb782
 +
 +struct userdata {
 +    pa_module *module;
-+    pa_sink *sink;
 +    pa_hook_slot *volume_changed_slot;
-+    pa_hook_slot *sink_put_slot;
++    pa_hook_slot *state_changed_slot;
 +    pa_defer_event *recover_defer;
 +    libcec_connection_t cec;
 +    int target_vol;
@@ -154,13 +153,6 @@ index 000000000..4d21cb782
 +    .alert                = cb_cec_alert,
 +};
 +
-+static pa_hook_result_t volume_changed_cb(pa_core *c, pa_sink *sink, struct userdata* u) {
-+    if (u->sink != sink)
-+        return PA_HOOK_OK;
-+    u->target_vol = pa_cvolume_avg(&sink->reference_volume) / (double)PA_VOLUME_NORM * 100;
-+    return PA_HOOK_OK;
-+}
-+
 +static void pa_sink_set_volume_cb(pa_sink *sink) {
 +    /* Empty callback to use "hardware" volume.
 +     *
@@ -168,10 +160,15 @@ index 000000000..4d21cb782
 +     * the volume change since the module userdata is not available this way. */
 +}
 +
-+static pa_hook_result_t sink_put_cb(pa_core *c, pa_sink *sink, struct userdata* u) {
++static pa_hook_result_t volume_changed_cb(pa_core *c, pa_sink *sink, struct userdata* u) {
 +    if (strstr(sink->name, "hdmi")) {
-+        /* Reregister HDMI sink (typically happens with new user session). */
-+        u->sink = sink;
++        u->target_vol = pa_cvolume_avg(&sink->reference_volume) / (double)PA_VOLUME_NORM * 100;
++    }
++    return PA_HOOK_OK;
++}
++
++static pa_hook_result_t sink_state_changed_cb(pa_core *c, pa_sink *sink, struct userdata* u) {
++    if (strstr(sink->name, "hdmi")) {
 +        u->target_vol = pa_cvolume_avg(&sink->reference_volume) / (double)PA_VOLUME_NORM * 100;
 +        pa_sink_set_set_volume_callback(sink, pa_sink_set_volume_cb);
 +        pa_cvolume_reset(&sink->soft_volume, sink->sample_spec.channels);
@@ -205,7 +202,6 @@ index 000000000..4d21cb782
 +
 +    m->userdata = u = pa_xnew(struct userdata, 1);
 +    u->module = m;
-+    u->sink = NULL;
 +#if CEC_LOGGING
 +    u->log_file = fopen("/home/jacko/Desktop/audlog.txt", "w");
 +#endif
@@ -215,7 +211,7 @@ index 000000000..4d21cb782
 +        pa_sink *sink;
 +        uint32_t sidx;
 +        PA_IDXSET_FOREACH(sink, m->core->sinks, sidx)
-+            sink_put_cb(m->core, sink, u);
++            sink_state_changed_cb(m->core, sink, u);
 +    }
 +
 +    libcec_clear_configuration(&g_config);
@@ -233,8 +229,8 @@ index 000000000..4d21cb782
 +
 +    u->volume_changed_slot = pa_hook_connect(&m->core->hooks[PA_CORE_HOOK_SINK_VOLUME_CHANGED], PA_HOOK_LATE,
 +                                             (pa_hook_cb_t)volume_changed_cb, u);
-+    u->sink_put_slot = pa_hook_connect(&m->core->hooks[PA_CORE_HOOK_SINK_PUT], PA_HOOK_LATE,
-+                                       (pa_hook_cb_t)sink_put_cb, u);
++    u->state_changed_slot = pa_hook_connect(&m->core->hooks[PA_CORE_HOOK_SINK_STATE_CHANGED], PA_HOOK_LATE,
++                                            (pa_hook_cb_t)sink_state_changed_cb, u);
 +
 +    return 0;
 +}
@@ -256,8 +252,8 @@ index 000000000..4d21cb782
 +
 +    if (u->volume_changed_slot)
 +        pa_hook_slot_free(u->volume_changed_slot);
-+    if (u->sink_put_slot)
-+        pa_hook_slot_free(u->sink_put_slot);
++    if (u->state_changed_slot)
++        pa_hook_slot_free(u->state_changed_slot);
 +    if (u->recover_defer)
 +        m->core->mainloop->defer_free(u->recover_defer);
 +
